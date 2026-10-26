@@ -1,0 +1,98 @@
+package com.example.drivezoneinspector.util
+
+import com.example.drivezoneinspector.model.DetectedFormat
+import com.example.drivezoneinspector.model.NumericField
+import org.json.JSONArray
+import org.json.JSONObject
+import org.xmlpull.v1.XmlPullParser
+import org.xmlpull.v1.XmlPullParserFactory
+import java.io.StringReader
+
+object FileParser {
+
+    fun isBinary(bytes: ByteArray): Boolean {
+        var nonPrintableCount = 0
+        val sampleSize = minOf(bytes.size, 1024)
+        for (i in 0 until sampleSize) {
+            val b = bytes[i].toInt()
+            if (b == 0) return true
+            if (b < 0x09 || (b in 0x0E..0x1F)) {
+                nonPrintableCount++
+            }
+        }
+        return if (sampleSize == 0) false else (nonPrintableCount.toFloat() / sampleSize.toFloat()) > 0.15f
+    }
+
+    fun detectFormat(text: String): DetectedFormat {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return DetectedFormat.PLAIN_TEXT
+
+        if ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+            (trimmed.startsWith("[") && trimmed.endsWith("]"))
+        ) {
+            try {
+                if (trimmed.startsWith("{")) JSONObject(trimmed) else JSONArray(trimmed)
+                return DetectedFormat.JSON
+            } catch (_: Exception) { }
+        }
+
+        if (trimmed.startsWith("<") && trimmed.endsWith(">")) {
+            try {
+                val factory = XmlPullParserFactory.newInstance()
+                factory.isNamespaceAware = true
+                val parser = factory.newPullParser()
+                parser.setInput(StringReader(trimmed))
+                var eventType = parser.eventType
+                var tagCount = 0
+                while (eventType != XmlPullParser.END_DOCUMENT) {
+                    if (eventType == XmlPullParser.START_TAG) tagCount++
+                    eventType = parser.next()
+                }
+                if (tagCount > 0) return DetectedFormat.XML
+            } catch (_: Exception) { }
+        }
+
+        return DetectedFormat.PLAIN_TEXT
+    }
+
+    fun extractNumericFields(text: String, format: DetectedFormat): List<NumericField> {
+        val results = mutableListOf<NumericField>()
+
+        when (format) {
+            DetectedFormat.JSON -> {
+                try {
+                    val trimmed = text.trim()
+                    if (trimmed.startsWith("{")) {
+                        extractFromJson(JSONObject(trimmed), "root", results)
+                    }
+                } catch (_: Exception) { }
+            }
+            DetectedFormat.XML, DetectedFormat.PLAIN_TEXT -> {
+                val regex = Regex("""([a-zA-Z0-9_\.\-]+)\s*[:=]\s*(-?\d+(?:\.\d+)?)""")
+                regex.findAll(text).forEach { match ->
+                    val key = match.groupValues[1]
+                    val numStr = match.groupValues[2]
+                    val num = numStr.toDoubleOrNull()
+                    if (num != null) {
+                        results.add(NumericField(key, num, !numStr.contains(".")))
+                    }
+                }
+            }
+            else -> {}
+        }
+        return results
+    }
+
+    private fun extractFromJson(obj: JSONObject, path: String, out: MutableList<NumericField>) {
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            val v = obj.get(k)
+            val currentPath = "$path.$k"
+            when (v) {
+                is Number -> out.add(NumericField(currentPath, v.toDouble(), v is Int || v is Long))
+                is JSONObject -> extractFromJson(v, currentPath, out)
+            }
+        }
+    }
+}
